@@ -1,4 +1,4 @@
-# SOP — Sistema de Backup de Unidade Sanitária
+# SOP — Sistema de Backup de Unidades Sanitárias (hf-backup)
 
 **Projecto:** CSaude — Sistema de Backups de Recuperação de Desastres
 **Âmbito:** Instalação, operação e recuperação do cliente de backup nas Unidades Sanitárias (US)

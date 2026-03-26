@@ -2750,6 +2750,12 @@ def _render(status, events):
         can_backup = can_backup and bool(drive_mounted) and bool(repo_ok)
     btn_backup_disabled = "" if can_backup else "disabled"
 
+    # ── Mode badge ──
+    if borg_mode == "local":
+        mode_badge = "<span class='badge warn'>&#128190; Local</span>"
+    else:
+        mode_badge = "<span class='badge info'>&#127760; Central</span>"
+
     # ── Table rows ──
     rows_html = ""
     for task, st, start_time, end_time, dur_secs in events:
@@ -2759,7 +2765,7 @@ def _render(status, events):
         log_btn = (
             f"<button class='btn-row-log' onclick=\"showLog('{date_key}')\">"
             f"&#128196; <span class='i' data-pt='Ver Log' data-en='View Log'>Ver Log</span></button>"
-        ) if date_key else "&mdash;"
+        ) if date_key and task == "backup" else "&mdash;"
         rows_html += (
             f"<tr>"
             f"<td>{task}</td>"
@@ -2780,8 +2786,9 @@ def _render(status, events):
   <title>Backup &mdash; {FACILITY}</title>
   <style>
     *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:monospace;background:#0f0f1a;color:#e0e0e0;padding:24px}}
-    h1{{color:#4CAF50;font-size:1.2rem;margin-bottom:2px}}
+    html,body{{height:100%}}
+    body{{font-family:monospace;font-size:14px;background:#0f0f1a;color:#e0e0e0;padding:24px;display:flex;flex-direction:column;overflow:hidden}}
+    h1{{color:#4CAF50;font-size:1.3rem;margin-bottom:2px}}
     .sub{{color:#666;font-size:.82em;margin-bottom:14px}}
     .bar{{background:#161626;border:1px solid #2a2a44;border-radius:6px;padding:10px 14px;margin-bottom:16px}}
     .bar-row{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
@@ -2797,6 +2804,10 @@ def _render(status, events):
     .btn-backup{{background:#922b21;color:#fff}}
     .btn-backup:hover{{background:#c0392b}}
     .btn-backup:disabled{{background:#3a2020;color:#555;cursor:not-allowed}}
+    .btn-confirm-yes{{background:#1a3d28;color:#4CAF50;border:1px solid #2d6a40}}
+    .btn-confirm-yes:hover{{background:#1f4d30}}
+    .btn-confirm-no{{background:#3d1a1a;color:#e74c3c;border:1px solid #6a2020}}
+    .btn-confirm-no:hover{{background:#4d2020}}
     .btn-recheck{{background:#1e1e3a;color:#7ecfff;border:1px solid #2a3a5a}}
     .btn-recheck:hover{{background:#252545}}
     .btn-lang{{background:#1e1e3a;color:#7ecfff;border:1px solid #2a3a5a;min-width:44px;text-align:center}}
@@ -2805,13 +2816,16 @@ def _render(status, events):
     .refresh-wrap select{{background:#1a1a2e;color:#aaa;border:1px solid #333;padding:3px 6px;font-size:.9em;font-family:monospace;border-radius:3px}}
     .meta-info{{font-size:.75em;color:#555;display:flex;align-items:center;gap:16px;flex-wrap:wrap}}
     .meta-info strong{{color:#666}}
+    #tbl{{flex:1;overflow-y:auto;min-height:0}}
+    #log-sec{{flex:1;min-height:0}}
     table{{width:100%;border-collapse:collapse;font-size:.85em}}
-    th{{background:#1e1e3a;padding:8px 14px;text-align:left;border-bottom:2px solid #2a2a4a;color:#888;font-weight:normal}}
+    th{{background:#1e1e3a;padding:8px 14px;text-align:left;border-bottom:2px solid #2a2a4a;color:#888;font-weight:normal;position:sticky;top:0;z-index:1}}
     td{{padding:8px 14px;border-bottom:1px solid #1e1e2e;vertical-align:middle}}
     tr:hover td{{background:#16162a}}
     .btn-row-log{{background:none;border:1px solid #2a2a44;color:#666;font-family:monospace;font-size:.75em;padding:2px 8px;border-radius:3px;cursor:pointer}}
     .btn-row-log:hover{{border-color:#5dade2;color:#5dade2}}
-    .log-panel{{background:#0a0a18;border:1px solid #2a2a4a;border-radius:6px;padding:14px;font-size:.82em;line-height:1.8;max-height:360px;overflow-y:auto}}
+    .log-panel{{background:#0a0a18;border:1px solid #2a2a4a;border-radius:6px;padding:14px;font-size:.82em;line-height:1.8;height:100%;display:flex;flex-direction:column;box-sizing:border-box}}
+    #log-body{{overflow-y:auto;flex:1}}
     .log-hdr{{color:#5dade2;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #1e1e3a;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}}
     .log-back{{color:#888;cursor:pointer;font-size:.9em}}
     .log-back:hover{{color:#ccc}}
@@ -2822,16 +2836,21 @@ def _render(status, events):
 </head>
 <body>
   <h1>&#128202; <span class="i" data-pt="Estado do Backup" data-en="Backup Status">Estado do Backup</span></h1>
-  <p class="sub"><span class="i" data-pt="Unidade Sanit&#225;ria" data-en="Health Facility">Unidade Sanit&#225;ria</span>: <strong>{FACILITY}</strong></p>
+  <p class="sub"><span class="i" data-pt="Unidade Sanit&#225;ria" data-en="Health Facility">Unidade Sanit&#225;ria</span>: <strong style="text-transform:uppercase">{FACILITY}</strong></p>
 
   <div class="bar">
     <div class="bar-row">
       {drive_section}
       {running_badge}
       <div class="divider"></div>
-      <button class="btn btn-backup" id="btn-backup" {btn_backup_disabled} onclick="triggerBackup()">
+      <button class="btn btn-backup" id="btn-backup" {btn_backup_disabled} onclick="askBackup()">
         &#9654; <span class="i" data-pt="Backup Agora" data-en="Backup Now">Backup Agora</span>
       </button>
+      <span id="backup-confirm" style="display:none;align-items:center;gap:6px">
+        <span style="font-size:.82em;color:#aaa"><span class="i" data-pt="Confirmar?" data-en="Confirm?">Confirmar?</span></span>
+        <button class="btn btn-confirm-yes" onclick="triggerBackup()">&#10003; <span class="i" data-pt="Sim" data-en="Yes">Sim</span></button>
+        <button class="btn btn-confirm-no" onclick="cancelBackup()">&#10007; <span class="i" data-pt="N&#227;o" data-en="No">N&#227;o</span></button>
+      </span>
       <button class="btn btn-recheck" id="btn-recheck" onclick="doRecheck()">
         &#8635; <span class="i" data-pt="Re-verificar" data-en="Re-check">Re-verificar</span>
       </button>
@@ -2851,6 +2870,7 @@ def _render(status, events):
       </div>
     </div>
     <div class="bar-row">
+      {mode_badge}
       <div class="spacer"></div>
       <div class="meta-info">
         <span><span class="i" data-pt="&#218;ltima verifica&#231;&#227;o" data-en="Last checked">&#218;ltima verifica&#231;&#227;o</span>: <strong id="last-checked">{now_utc}</strong></span>
@@ -2914,7 +2934,6 @@ def _render(status, events):
         else setRefresh(val); // defer while log open
       }},secs*1000);
     }}
-    try{{localStorage.setItem('hf_backup_refresh_interval',val);}}catch(e){{}}
   }}
 
   // ── Log panel ──
@@ -2948,27 +2967,27 @@ def _render(status, events):
     setRefresh(sel?sel.value:'30');
   }}
 
-  // ── Re-check ──
+  // ── Re-check (cache-busting reload) ──
   function doRecheck(){{
     var btn=document.getElementById('btn-recheck');
     btn.innerHTML='<span class="spin">&#8635;</span> '+(LANG==='pt'?'A verificar\u2026':'Checking\u2026');
     btn.disabled=true;
-    fetch('/api/status')
-      .then(function(r){{return r.json();}} )
-      .then(function(s){{
-        document.getElementById('last-checked').textContent=new Date().toISOString().replace('T',' ').slice(0,19)+' UTC';
-        // Reload to reflect updated badge states from server-rendered HTML
-        location.reload();
-      }})
-      .catch(function(){{btn.disabled=false;btn.innerHTML='&#8635; '+(LANG==='pt'?'Re-verificar':'Re-check');}});
+    location.href=location.pathname+'?_='+Date.now();
   }}
 
   // ── Backup Now ──
+  function askBackup(){{
+    document.getElementById('btn-backup').style.display='none';
+    var c=document.getElementById('backup-confirm');
+    c.style.display='inline-flex';
+    applyLang();
+  }}
+  function cancelBackup(){{
+    document.getElementById('btn-backup').style.display='';
+    document.getElementById('backup-confirm').style.display='none';
+  }}
   function triggerBackup(){{
-    var msg=LANG==='pt'
-      ?'Iniciar um backup imediato agora?\n\nEsta opera\u00e7\u00e3o pode demorar v\u00e1rios minutos.'
-      :'Start an immediate backup now?\n\nThis may take several minutes.';
-    if(!confirm(msg)) return;
+    cancelBackup();
     var btn=document.getElementById('btn-backup');
     btn.disabled=true;
     btn.innerHTML='&#9654; '+(LANG==='pt'?'A iniciar\u2026':'Starting\u2026');
@@ -2988,15 +3007,8 @@ def _render(status, events):
     try{{
       var savedLang=localStorage.getItem('hf_backup_lang');
       if(savedLang==='en') LANG='en';
-      var savedRefresh=localStorage.getItem('hf_backup_refresh_interval');
-      var sel=document.getElementById('refresh-sel');
-      if(savedRefresh&&sel){{
-        sel.value=savedRefresh;
-        setRefresh(savedRefresh);
-      }} else {{
-        setRefresh('30');
-      }}
-    }}catch(e){{setRefresh('30');}}
+    }}catch(e){{}}
+    setRefresh('30');
     applyLang();
   }})();
   </script>
@@ -3010,12 +3022,15 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # suppress per-request noise
 
-    def _send(self, status, content_type, body):
+    def _send(self, status, content_type, body, extra_headers=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -3039,7 +3054,9 @@ class _Handler(BaseHTTPRequestHandler):
             status = _get_status()
             events = _get_events()
             html = _render(status, events)
-            self._send(200, "text/html; charset=utf-8", html)
+            self._send(200, "text/html; charset=utf-8", html,
+                       {"Cache-Control": "no-store, no-cache, must-revalidate",
+                        "Pragma": "no-cache", "Expires": "0"})
         else:
             self._send(404, "text/plain", "Not found\n")
 

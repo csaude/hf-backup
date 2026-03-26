@@ -631,7 +631,7 @@ write_env_file() {
 
   # Determine a free port for the local web server.
   # If .env already has a WEB_PORT, reuse it; otherwise probe for a free one.
-  local _web_port
+  local _web_port=""
   if [[ -f ".env" ]]; then
     _web_port=$(grep -E '^WEB_PORT=' .env | cut -d= -f2 | tr -d '"' | tr -d "'" | head -1)
   fi

@@ -608,6 +608,15 @@ EOF
   chmod +x "$f"
 }
 
+_find_free_port() {
+  # Find a free TCP port starting at $1, incrementing by 1 until one is available.
+  local port="${1:-22587}"
+  while ss -tlnH "sport = :${port}" 2>/dev/null | grep -q ":${port}"; do
+    port=$(( port + 1 ))
+  done
+  echo "$port"
+}
+
 write_env_file() {
   local f=".env"
 
@@ -619,6 +628,17 @@ write_env_file() {
 
   local _enable_monit
   [[ "${_borg_mode:-central}" == "local" ]] && _enable_monit="false" || _enable_monit="true"
+
+  # Determine a free port for the local web server.
+  # If .env already has a WEB_PORT, reuse it; otherwise probe for a free one.
+  local _web_port
+  if [[ -f ".env" ]]; then
+    _web_port=$(grep -E '^WEB_PORT=' .env | cut -d= -f2 | tr -d '"' | tr -d "'" | head -1)
+  fi
+  if [[ -z "${_web_port}" ]]; then
+    _web_port=$(_find_free_port 22587)
+    log "Web server port: ${_web_port}"
+  fi
 
   local _tmpf
   _tmpf=$(mktemp)
@@ -676,7 +696,7 @@ SCHEDULE=14:30
 
 # ---- Local Web Status Server ----
 # Port for the local backup status web server (accessible on the HF LAN)
-WEB_PORT=22587
+WEB_PORT=${_web_port}
 
 # ---- Central notifications server ----
 # Settings to sent backup status to central Pushgateway
@@ -709,11 +729,14 @@ EOF
     mv "$_tmpf" "$f"
     chmod 600 "$f"
     log "Created ${f}."
-    return 0
+  else
+    # File already exists — smart merge: add new variables, diff changed values.
+    _merge_env_file "$f" "$_tmpf"
   fi
 
-  # File already exists — smart merge: add new variables, diff changed values.
-  _merge_env_file "$f" "$_tmpf"
+  # Always ensure WEB_PORT reflects the resolved value (covers re-runs where
+  # the merge skips already-present keys but the port may have changed).
+  _write_status "WEB_PORT" "${_web_port}"
 }
 
 write_borgmatic_config() {
@@ -3077,6 +3100,43 @@ PYEOF
   log "Web server files written to ${dir}"
 }
 
+_fix_permissions() {
+  # Enforce correct permissions on all files written by the installer.
+  # Safe to call on every run (idempotent).
+  : "${BASE_DIR:=$(pwd)}"
+
+  # Sensitive directories
+  [[ -d "${BASE_DIR}/ssh" ]]              && chmod 700 "${BASE_DIR}/ssh"
+  [[ -d "${BASE_DIR}/ssh/tls" ]]          && chmod 700 "${BASE_DIR}/ssh/tls"
+  [[ -d "${BASE_DIR}/runtime/dbconf" ]]   && chmod 700 "${BASE_DIR}/runtime/dbconf"
+  [[ -d "${BASE_DIR}/runtime/backups" ]]  && chmod 750 "${BASE_DIR}/runtime/backups"
+  [[ -d "${BASE_DIR}/runtime/logs" ]]     && chmod 750 "${BASE_DIR}/runtime/logs"
+
+  # Private SSH / TLS keys — owner read-only
+  find "${BASE_DIR}/ssh" -maxdepth 2 \( -name "id_rsa" -o -name "id_kek" -o -name "*.key" \) \
+    -exec chmod 600 {} \; 2>/dev/null || true
+
+  # Public keys / known_hosts
+  find "${BASE_DIR}/ssh" -maxdepth 2 \( -name "*.pub" -o -name "known_hosts" \) \
+    -exec chmod 644 {} \; 2>/dev/null || true
+
+  # .env — must be root-readable only (contains BORG_PASSPHRASE etc.)
+  [[ -f "${BASE_DIR}/.env" ]] && chmod 600 "${BASE_DIR}/.env"
+
+  # Executable scripts
+  for _s in hf-tool.sh runtime/backup.sh runtime/pushgw-event.sh; do
+    [[ -f "${BASE_DIR}/${_s}" ]] && chmod 750 "${BASE_DIR}/${_s}"
+  done
+
+  # Borgmatic config — sensitive (contains passphrases / DB credentials)
+  find "${BASE_DIR}/config" -name "*.yaml" -exec chmod 600 {} \; 2>/dev/null || true
+
+  # DB config files
+  find "${BASE_DIR}/runtime/dbconf" -type f -exec chmod 600 {} \; 2>/dev/null || true
+
+  log "File permissions verified."
+}
+
 main() {
   BASE_DIR=$(pwd)
   facility_code=$(pwd | xargs basename)
@@ -3146,6 +3206,8 @@ EOF
     systemctl daemon-reload
     log "systemd service updated."
   fi
+
+  _fix_permissions
 
   echo
   if [[ "${_already_run}" == "yes" ]]; then

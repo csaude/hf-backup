@@ -36,15 +36,34 @@ cd /opt/hf-backup/namacurra
 
 > O nome da directoria **é** o identificador da US. Usar apenas letras minúsculas e sem espaços.
 
-### Passo 2 — Executar o instalador
+### Passo 2 — Obter o instalador
+
+**US com acesso à internet:**
 
 ```bash
-sudo bash /caminho/para/hf-backup.sh
+git clone https://github.com/csaude/hf-backup.git
+```
+
+**US sem acesso à internet:**
+
+1. Noutro computador com internet, aceder a [https://github.com/csaude/hf-backup](https://github.com/csaude/hf-backup) e descarregar o repositório como ZIP (botão **Code → Download ZIP**).
+2. Copiar o ficheiro ZIP para uma pen drive.
+3. Na máquina da US, copiar o ZIP para a directoria criada no passo anterior e extrair:
+
+```bash
+cp /media/<pen>/hf-backup-main.zip /opt/hf-backup/namacurra/
+unzip hf-backup-main.zip
+```
+
+### Passo 3 — Executar o instalador
+
+```bash
+sudo bash hf-backup/hf-backup.sh
 ```
 
 Quando solicitado, definir uma `BORG_PASSPHRASE` forte (mínimo 8 caracteres). **Guardar imediatamente num local seguro fora desta máquina** — sem ela é impossível recuperar qualquer backup.
 
-### Passo 3 — Enviar as chaves ao administrador central
+### Passo 4 — Enviar as chaves ao administrador central
 
 O instalador gera o ficheiro `hf-namacurra-keys.tar.gz`. Enviar ao administrador do servidor central e aguardar confirmação de que o utilizador foi criado e as chaves registadas.
 
@@ -52,7 +71,7 @@ O instalador gera o ficheiro `hf-namacurra-keys.tar.gz`. Enviar ao administrador
 ls hf-namacurra-keys.tar.gz   # confirmar que o ficheiro existe
 ```
 
-### Passo 4 — (Opcional) Adicionar bases de dados ao backup
+### Passo 5 — (Opcional) Adicionar bases de dados ao backup
 
 Repetir para cada base de dados a incluir:
 
@@ -60,7 +79,7 @@ Repetir para cada base de dados a incluir:
 sudo ./hf-tool.sh --db-add
 ```
 
-### Passo 5 — Inicializar o repositório
+### Passo 6 — Inicializar o repositório
 
 ```bash
 sudo ./hf-tool.sh --init
@@ -70,13 +89,13 @@ Este comando trata de tudo: troca de certificados mTLS (se aplicável), iniciali
 
 > Se a monitorização estiver activa (`ENABLE_MONIT=true`) e o administrador ainda não tiver assinado o certificado, o comando avisa e termina — basta re-executá-lo após confirmação.
 
-### Passo 6 — Executar o primeiro backup
+### Passo 7 — Executar o primeiro backup
 
 ```bash
 sudo ./hf-tool.sh --backup-now
 ```
 
-### Passo 7 — Verificar o estado no browser
+### Passo 8 — Verificar o estado no browser
 
 Abrir num browser da rede local:
 
@@ -171,10 +190,29 @@ cd namacurra
 
 > **Atenção:** Todos os serviços, chaves e caminhos remotos são derivados deste nome. Nunca renomear esta directoria após a instalação.
 
-### 3.2. Executar o instalador
+### 3.2. Obter o instalador
+
+**US com acesso à internet:**
 
 ```bash
-sudo bash /caminho/para/hf-backup.sh
+git clone https://github.com/csaude/hf-backup.git
+```
+
+**US sem acesso à internet:**
+
+1. Noutro computador com internet, aceder a [https://github.com/csaude/hf-backup](https://github.com/csaude/hf-backup) e descarregar o repositório como ZIP (botão **Code → Download ZIP**).
+2. Copiar o ficheiro ZIP para uma pen drive.
+3. Na máquina da US, copiar o ZIP para a directoria da US e extrair:
+
+```bash
+cp /media/<pen>/hf-backup-main.zip /opt/hf-backup/namacurra/
+unzip hf-backup-main.zip
+```
+
+### 3.3. Executar o instalador
+
+```bash
+sudo bash hf-backup/hf-backup.sh
 ```
 
 O instalador irá:
@@ -189,7 +227,7 @@ O instalador irá:
 
 > **Nota:** O instalador **não** instala os serviços systemd. Isso acontece durante o passo `--init`.
 
-### 3.3. Regras para a BORG_PASSPHRASE
+### 3.4. Regras para a BORG_PASSPHRASE
 
 A palavra-passe deve ter **pelo menos 8 caracteres**. É solicitada durante a instalação e também durante o `--init` caso ainda não esteja definida.
 

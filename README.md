@@ -41,7 +41,7 @@ cd /opt/hf-backup/namacurra
 **US com acesso à internet:**
 
 ```bash
-git clone https://github.com/csaude/hf-backup.git
+git clone https://github.com/csaude/hf-backup.git .
 ```
 
 **US sem acesso à internet:**
@@ -52,13 +52,13 @@ git clone https://github.com/csaude/hf-backup.git
 
 ```bash
 cp /media/<pen>/hf-backup-main.zip /opt/hf-backup/namacurra/
-unzip hf-backup-main.zip
+unzip hf-backup-main.zip && mv hf-backup-main/* . && rm -rf hf-backup-main
 ```
 
 ### Passo 3 — Executar o instalador
 
 ```bash
-sudo bash hf-backup/hf-backup.sh
+sudo bash hf-backup.sh
 ```
 
 Quando solicitado, definir uma `BORG_PASSPHRASE` forte (mínimo 8 caracteres). **Guardar imediatamente num local seguro fora desta máquina** — sem ela é impossível recuperar qualquer backup.
@@ -195,7 +195,7 @@ cd namacurra
 **US com acesso à internet:**
 
 ```bash
-git clone https://github.com/csaude/hf-backup.git
+git clone https://github.com/csaude/hf-backup.git .
 ```
 
 **US sem acesso à internet:**
@@ -206,13 +206,13 @@ git clone https://github.com/csaude/hf-backup.git
 
 ```bash
 cp /media/<pen>/hf-backup-main.zip /opt/hf-backup/namacurra/
-unzip hf-backup-main.zip
+unzip hf-backup-main.zip && mv hf-backup-main/* . && rm -rf hf-backup-main
 ```
 
 ### 3.3. Executar o instalador
 
 ```bash
-sudo bash hf-backup/hf-backup.sh
+sudo bash hf-backup.sh
 ```
 
 O instalador irá:
@@ -815,14 +815,32 @@ cd /opt/hf-backup/<codigo_us>
 # 1. Criar arquivo de recuperação antes de actualizar (precaução)
 ./hf-tool.sh --backup-config
 
-# 2. Re-executar o instalador com o script actualizado
-sudo bash /caminho/para/hf-backup.sh
+# 2. Obter a versão actualizada do instalador
+```
 
-# 3. Verificar que os serviços estão activos após a actualização
+**US com acesso à internet:**
+
+```bash
+git pull
+```
+
+**US sem acesso à internet:**
+
+```bash
+# Noutro computador, descarregar o ZIP e copiar para pen drive
+cp /media/<pen>/hf-backup-main.zip .
+unzip -o hf-backup-main.zip && mv hf-backup-main/* . && rm -rf hf-backup-main
+```
+
+```bash
+# 3. Re-executar o instalador
+sudo bash hf-backup.sh
+
+# 4. Verificar que os serviços estão activos após a actualização
 systemctl status hf-backup-<codigo_us>.service
 systemctl status hf-backup-<codigo_us>.timer
 
-# 4. Testar backup manual
+# 5. Testar backup manual
 sudo ./hf-tool.sh --backup-now
 ```
 

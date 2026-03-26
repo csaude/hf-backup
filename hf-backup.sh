@@ -718,7 +718,6 @@ _private_key_generated=no
 _csr_submitted=no
 _cert_downloaded=no
 _ca_cert_downloaded=no
-_cert_downloaded=no
 _borg_initialized=no
 _status=not_initialized
 # -----------------------------------------------------------------------------
@@ -1421,6 +1420,7 @@ SFTP_CERT
       c_rc=$?
       set -e
       if [[ $c_rc -eq 0 && -f "$cert" ]]; then
+        echo
         log "Signed certificate downloaded: ${cert_filename}"
         _write_status "_cert_downloaded" "yes"
       fi

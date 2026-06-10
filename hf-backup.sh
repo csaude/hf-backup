@@ -288,7 +288,8 @@ write_dirs() {
     "${BASE_DIR}/runtime/backups" \
     "${BASE_DIR}/runtime/logs" \
     "${BASE_DIR}/runtime/dbconf" \
-    "${BASE_DIR}/runtime/web-server"
+    "${BASE_DIR}/runtime/web-server" \
+    "${BASE_DIR}/usb"
 
   chmod 700 "${BASE_DIR}/ssh"
   chmod 700 "${BASE_DIR}/runtime/dbconf"
@@ -889,11 +890,11 @@ write_compose() {
   done
 
   # Extra volumes for the hf-web service
+  # The web container reads drive_status.json from usb/ instead of mounting
+  # the drive directly — drive detection is handled by udev event scripts.
   local web_extra_mounts=""
   web_extra_mounts+="      - ${BASE_DIR}/runtime/logs:/app/logs:ro"$'\n'
-  if [[ "${BORG_MODE:-central}" == "local" && -n "${EXTERNAL_STORAGE_PATH:-}" ]]; then
-    web_extra_mounts+="      - ${EXTERNAL_STORAGE_PATH}:/mnt/external:ro"$'\n'
-  fi
+  web_extra_mounts+="      - ${BASE_DIR}/usb:/app/usb:ro"$'\n'
 
   : "${IMAGE:?IMAGE must be set in .env}"
   : "${TZ:=Africa/Maputo}"
@@ -936,7 +937,7 @@ ${mounts}
       - ./.env
     volumes:
       - ${BASE_DIR}/runtime/web-server:/app/web-server
-${web_extra_mounts}
+${web_extra_mounts}      # hf-web-extra-mounts
 EOF
 }
 
@@ -1769,22 +1770,126 @@ FDISK_CMDS
     local part_uuid
     part_uuid=$(blkid -s UUID -o value "$part_dev" 2>/dev/null)
     if [[ -n "$part_uuid" ]]; then
+        _write_status "EXTERNAL_STORAGE_UUID" "$part_uuid"
+
         # fstab: noauto so boot does not stall; nofail as belt-and-suspenders
         sed -i "\|[[:space:]]${mount_point}[[:space:]]|d" /etc/fstab
         echo "UUID=${part_uuid}  ${mount_point}  ext4  defaults,noauto,nofail  0  2" >> /etc/fstab
 
-        # udev rule: on block device add, match our UUID and mount via a transient
-        # systemd unit (systemd-run --no-block avoids blocking the udev event queue)
-        local udev_rule="/etc/udev/rules.d/99-hf-backup-${facility_code}.rules"
-        cat > "$udev_rule" <<UDEV
-ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="${part_uuid}", ENV{ID_FS_TYPE}=="ext4", RUN+="/bin/systemd-run --no-block /bin/mount UUID=${part_uuid} ${mount_point}"
-UDEV
-        udevadm control --reload-rules
-        log "Automount configured: drive will mount at ${mount_point} on insertion (UUID=${part_uuid})."
+        # Generate USB event scripts + udev rule (mounts drive on insertion,
+        # writes drive_status.json for the web UI on both add and remove).
+        _write_usb_event_scripts
     else
         warn "Could not read UUID from ${part_dev} — automount not configured. Manual mount required after reboot."
     fi
     echo
+}
+
+# Add the external drive bind-mount to the borgmatic service in compose.yml, and
+# ensure the web service has the usb/ status dir mounted.
+# Safe on both new installs (uses markers) and old installs (falls back to anchors).
+_compose_add_external_vol() {
+    local ext_path="$1"
+    local yml="${BASE_DIR}/compose.yml"
+
+    # ── borgmatic service ──────────────────────────────────────────────────────
+    if ! grep -q "/mnt/external" "$yml"; then
+        sed -i "s|# host data mounts|# external storage device (local mode)\n      - ${ext_path}:/mnt/external\n\n      # host data mounts|" "$yml"
+    fi
+
+    # ── web service: ensure usb status dir is mounted ─────────────────────────
+    local web_has_usb
+    web_has_usb=$(awk "/container_name: hf-web-${facility_code}/{found=1} found && /\/app\/usb/{print; exit}" "$yml")
+    if [[ -z "$web_has_usb" ]]; then
+        if grep -q "# hf-web-extra-mounts" "$yml"; then
+            sed -i "s|      # hf-web-extra-mounts|      - ${BASE_DIR}/usb:/app/usb:ro\n      # hf-web-extra-mounts|" "$yml"
+        else
+            sed -i "/runtime\/logs:\/app\/logs:ro/a\\      - ${BASE_DIR}/usb:/app/usb:ro" "$yml"
+        fi
+        log "USB status dir mounted in web service (compose.yml)."
+    fi
+}
+
+# (Re)generate the USB event scripts and udev rule from the current .env values.
+# Called after disk setup in --set-mode local so hf-tool.sh can also install them.
+_write_usb_event_scripts() {
+    local part_uuid
+    part_uuid=$(_read_ini_value "${BASE_DIR}/.env" "EXTERNAL_STORAGE_UUID")
+    local mount_point
+    mount_point=$(_read_ini_value "${BASE_DIR}/.env" "EXTERNAL_STORAGE_PATH")
+
+    [[ -z "$part_uuid" || -z "$mount_point" ]] && return 0
+
+    local usb_dir="${BASE_DIR}/usb"
+    local status_json="${usb_dir}/drive_status.json"
+    local env_file="${BASE_DIR}/.env"
+
+    mkdir -p "$usb_dir"
+
+    cat > "${usb_dir}/hf-backup-usb-added.sh" <<ADDSCRIPT
+#!/usr/bin/env bash
+# hf-backup-usb-added.sh — called by udev on drive insertion.
+set -euo pipefail
+
+MOUNT_POINT="${mount_point}"
+STATUS_JSON="${status_json}"
+BORG_PASSPHRASE=\$(grep -E '^BORG_PASSPHRASE=' "${env_file}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+IMAGE=\$(grep -E '^IMAGE=' "${env_file}" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+
+mount -U "${part_uuid}" "\${MOUNT_POINT}" 2>/dev/null || true
+
+for _i in \$(seq 1 15); do
+    mountpoint -q "\${MOUNT_POINT}" && break
+    sleep 1
+done
+
+if ! mountpoint -q "\${MOUNT_POINT}"; then
+    printf '{"mounted": false, "updated_at": "%s"}\n' "\$(date -u +%Y-%m-%dT%H:%M:%S)" > "\${STATUS_JSON}"
+    exit 0
+fi
+
+REPO_PATH="\${MOUNT_POINT}/repo"
+REPO_INITIALIZED=false
+REPO_AVAILABLE=false
+
+if [[ -d "\${REPO_PATH}" ]]; then
+    REPO_INITIALIZED=true
+    if docker info >/dev/null 2>&1 && [[ -n "\${IMAGE:-}" ]]; then
+        if docker run --rm \
+            -e BORG_PASSPHRASE="\${BORG_PASSPHRASE}" \
+            -v "\${REPO_PATH}:/mnt/check:ro" \
+            "\${IMAGE}" \
+            borg info /mnt/check >/dev/null 2>&1; then
+            REPO_AVAILABLE=true
+        fi
+    else
+        [[ -f "\${REPO_PATH}/config" ]] && REPO_AVAILABLE=true
+    fi
+fi
+
+printf '{\n  "mounted": true,\n  "mountpoint": "%s",\n  "repo_path": "%s",\n  "repo_initialized": %s,\n  "repo_available": %s,\n  "updated_at": "%s"\n}\n' \
+    "\${MOUNT_POINT}" "\${REPO_PATH}" "\${REPO_INITIALIZED}" "\${REPO_AVAILABLE}" "\$(date -u +%Y-%m-%dT%H:%M:%S)" \
+    > "\${STATUS_JSON}"
+ADDSCRIPT
+
+    cat > "${usb_dir}/hf-backup-usb-removed.sh" <<RMSCRIPT
+#!/usr/bin/env bash
+# hf-backup-usb-removed.sh — called by udev on drive removal.
+set -euo pipefail
+
+STATUS_JSON="${status_json}"
+printf '{"mounted": false, "updated_at": "%s"}\n' "\$(date -u +%Y-%m-%dT%H:%M:%S)" > "\${STATUS_JSON}"
+RMSCRIPT
+
+    chmod +x "${usb_dir}/hf-backup-usb-added.sh" "${usb_dir}/hf-backup-usb-removed.sh"
+
+    local udev_rule="/etc/udev/rules.d/99-hf-backup-${facility_code}.rules"
+    cat > "$udev_rule" <<UDEV
+ACTION=="add",    SUBSYSTEM=="block", ENV{ID_FS_UUID}=="${part_uuid}", ENV{ID_FS_TYPE}=="ext4", RUN+="/bin/systemd-run --no-block ${usb_dir}/hf-backup-usb-added.sh"
+ACTION=="remove", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="${part_uuid}", RUN+="/bin/systemd-run --no-block ${usb_dir}/hf-backup-usb-removed.sh"
+UDEV
+    udevadm control --reload-rules
+    log "USB event scripts and udev rule updated."
 }
 
 _do_init() {
@@ -1889,10 +1994,7 @@ _do_init() {
         sed -i "s|path: \"ssh://.*\"|path: \"/mnt/external/repo\"|" "$cfg"
         sed -i "s|label: central|label: local|" "$cfg"
         log "Borgmatic config updated to use local repo."
-        if ! grep -q "/mnt/external" "${BASE_DIR}/compose.yml"; then
-            sed -i "s|# host data mounts|# external storage device (local mode)\n      - ${ext_path}:/mnt/external\n\n      # host data mounts|" "${BASE_DIR}/compose.yml"
-            log "External storage volume added to compose.yml."
-        fi
+        _compose_add_external_vol "$ext_path"
         _write_status "BORG_REPO" "/mnt/external/repo"
         _write_status "ENABLE_MONIT" "false"
         _write_status "_monitoring" "disabled"
@@ -2248,6 +2350,9 @@ _do_set_mode() {
             udevadm control --reload-rules
             umount "$ext_path" 2>/dev/null || true
             log "Automount entry and udev rule removed; external drive unmounted."
+            # Reset drive status JSON so web UI shows no drive in central mode
+            printf '{"mounted": false, "updated_at": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+                > "${BASE_DIR}/usb/drive_status.json" 2>/dev/null || true
         fi
 
         # Update .env
@@ -2295,11 +2400,8 @@ _do_set_mode() {
         sed -i "s|label: central|label: local|" "$cfg"
         log "Borgmatic config updated to local repo."
 
-        # Add the external storage volume to compose.yml
-        if ! grep -q "/mnt/external" "${BASE_DIR}/compose.yml"; then
-            sed -i "s|# host data mounts|# external storage device (local mode)\n      - ${ext_path}:/mnt/external\n\n      # host data mounts|" "${BASE_DIR}/compose.yml"
-            log "External storage volume added to compose.yml."
-        fi
+        # Add the external storage volume to compose.yml (borgmatic + web service)
+        _compose_add_external_vol "$ext_path"
 
         _write_status "BORG_REPO" "/mnt/external/repo"
 
@@ -2341,6 +2443,23 @@ _do_set_mode() {
     fi
 }
 
+_do_no_automount() {
+    need_root
+    local udev_rule="/etc/udev/rules.d/99-hf-backup-${facility_code}.rules"
+    if [[ ! -f "$udev_rule" ]]; then
+        warn "No udev rule found for this facility — nothing to remove."
+        return 0
+    fi
+    rm -f "$udev_rule"
+    udevadm control --reload-rules
+    # Reset status JSON so the web UI shows drive as absent
+    local status_json="${BASE_DIR}/usb/drive_status.json"
+    printf '{"mounted": false, "updated_at": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+        > "${status_json}" 2>/dev/null || true
+    log "Automount and drive detection disabled (udev rule removed)."
+    log "Re-enable with: sudo ./hf-tool.sh --set-mode local"
+}
+
 _usage(){
     cat <<'EOH' >&2
 Usage: ./hf-tool.sh [COMMAND]
@@ -2360,6 +2479,7 @@ Commands:
   --db-remove [name]  remove a database backup configuration
   --list-vars         list all variables and their values from .env
   --set VAR           prompt for and set a variable in .env (masked input for sensitive vars)
+  --no-automount      remove udev automount/detection rule for the backup drive (requires sudo)
 
 
 EOH
@@ -2406,6 +2526,7 @@ case "$1" in
     --db-remove)   _do_db_remove "${2:-}" ;;
     --list-vars)   _do_list_vars ;;
     --set)         _do_set_var "${2:-}" ;;
+    --no-automount) _do_no_automount ;;
     *)             _usage ;;
 esac
 
@@ -2587,10 +2708,11 @@ from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-DB_PATH         = os.environ.get("STATUS_DB_PATH", "/app/web-server/backup_status.db")
-PORT            = int(os.environ.get("WEB_PORT", "22587"))
-FACILITY        = os.environ.get("FACILITY_CODE", os.environ.get("HOSTNAME", "unknown"))
-BORG_MODE       = os.environ.get("BORG_MODE", "central")
+DB_PATH           = os.environ.get("STATUS_DB_PATH", "/app/web-server/backup_status.db")
+PORT              = int(os.environ.get("WEB_PORT", "22587"))
+FACILITY          = os.environ.get("FACILITY_CODE", os.environ.get("HOSTNAME", "unknown"))
+BORG_MODE         = os.environ.get("BORG_MODE", "central")
+DRIVE_STATUS_JSON = os.environ.get("DRIVE_STATUS_JSON", "/app/usb/drive_status.json")
 RETENTION       = 60   # days
 SENTINEL        = os.path.join(os.environ.get("WEB_SERVER_DIR", "/app/web-server"), "trigger_backup")
 LOG_DIR         = os.environ.get("LOG_DIR", "/app/logs")
@@ -2642,25 +2764,25 @@ def _get_events():
 
 
 def _check_drive_status():
-    """Returns (drive_mounted, repo_ok) for local mode; (None, None) for central."""
+    """Returns (drive_mounted, repo_initialized, repo_ok) from drive_status.json.
+    Central mode → (None, None, None). Drive absent → (False, None, None)."""
     if BORG_MODE != "local":
-        return None, None
-    drive = os.path.ismount("/mnt/external")
-    if not drive:
-        return False, None
+        return None, None, None
     try:
-        r = subprocess.run(
-            ["borg", "info", "/mnt/external/repo"],
-            capture_output=True, timeout=10, env=os.environ,
-        )
-        return True, r.returncode == 0
-    except Exception:
-        return True, False
+        with open(DRIVE_STATUS_JSON) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False, None, None
+    if not data.get("mounted"):
+        return False, None, None
+    if data.get("repo_initialized") is False:
+        return True, False, None
+    return True, True, bool(data.get("repo_available"))
 
 
 def _get_status():
     """Build the /api/status JSON dict. Always live — no caching."""
-    drive_mounted, repo_ok = _check_drive_status()
+    drive_mounted, repo_initialized, repo_ok = _check_drive_status()
 
     # Stale sentinel cleanup
     backup_pending = False
@@ -2695,6 +2817,7 @@ def _get_status():
         "facility": FACILITY,
         "borg_mode": BORG_MODE,
         "drive_mounted": drive_mounted,
+        "repo_initialized": repo_initialized,
         "repo_ok": repo_ok,
         "backup_running": backup_running,
         "backup_pending": backup_pending,
@@ -2737,9 +2860,10 @@ _STATUS_ICON  = {"completed": "&#10003;", "failed": "&#10007;", "starting": "&#8
 
 
 def _render(status, events):
-    borg_mode       = status["borg_mode"]
-    drive_mounted   = status["drive_mounted"]
-    repo_ok         = status["repo_ok"]
+    borg_mode        = status["borg_mode"]
+    drive_mounted    = status["drive_mounted"]
+    repo_initialized = status.get("repo_initialized")
+    repo_ok          = status["repo_ok"]
     backup_running  = status["backup_running"]
     backup_pending  = status["backup_pending"]
 
@@ -2753,6 +2877,8 @@ def _render(status, events):
             drive_badge = "<span class='badge err' id='badge-drive'>&#128190; Drive: <span class='i' data-pt='Ausente' data-en='Missing'>Ausente</span></span>"
         if repo_ok:
             repo_badge = "<span class='badge ok' id='badge-repo'>&#128274; Repo: OK</span>"
+        elif repo_initialized is False:
+            repo_badge = "<span class='badge warn' id='badge-repo'>&#128274; Repo: <span class='i' data-pt='N\u00e3o iniciado' data-en='Not initialized'>N\u00e3o iniciado</span></span>"
         elif drive_mounted:
             repo_badge = "<span class='badge warn' id='badge-repo'>&#128274; Repo: <span class='i' data-pt='Erro' data-en='Error'>Erro</span></span>"
         else:

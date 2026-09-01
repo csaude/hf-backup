@@ -472,6 +472,7 @@ load_ini() {
 }
 
 tolower() { echo "${1,,}"; }
+toupper() { echo "${1^^}"; }
 
 # --- Load runtime config ---
 #load_ini "$ENV_FILE"
@@ -513,7 +514,7 @@ if compgen -G "${DB_CONF_DIR}/.*.conf" > /dev/null 2>&1; then
     name=$(basename "$conf"); name="${name#.}"; name="${name%.conf}"
 
     # parse conf into local vars (scoped to subshell to avoid leaking)
-    unset DB_TYPE BACKUP HOST PORT USER PASSWORD DATABASE
+    unset DB_TYPE BACKUP HOST PORT USER PASSWORD DATABASE CHARSET EXTRA_OPTS SKIP_EVENTS
     while IFS= read -r line || [[ -n "$line" ]]; do
       line="${line#"${line%%[![:space:]]*}"}"
       [[ -z "$line" || "$line" =~ ^# ]] && continue
@@ -525,22 +526,89 @@ if compgen -G "${DB_CONF_DIR}/.*.conf" > /dev/null 2>&1; then
       export "$key=$val"
     done < "$conf"
 
-    if [[ "${BACKUP,,:-false}" != "true" ]]; then
-      log "DB [${name}]: BACKUP=false, skipping."
+    if [[ "$(tolower "${BACKUP:-false}")" != "true" ]]; then
+      log "DB [${name}]: BACKUP=${BACKUP:-false}, skipping."
       continue
     fi
 
-    case "${DB_TYPE^^:-}" in
+    case "$(toupper "${DB_TYPE:-}")" in
       M)
         PORT="${PORT:-3306}"
         OUT="${DB_DIR}/mysql/${name}_${TS}.sql.gz"
+
+        # Credentials go in a 0600 option file rather than on the command line:
+        # the version probe and the dump share one definition, and the password
+        # never shows up in `ps`.
+        MYCNF="$(mktemp "${TMPDIR:-/tmp}/hfdb.XXXXXX")"
+        chmod 600 "$MYCNF"
+        _pw="${PASSWORD//\\/\\\\}"; _pw="${_pw//\"/\\\"}"
+        printf '[client]\nhost=%s\nport=%s\nuser=%s\npassword="%s"\n' \
+          "${HOST}" "${PORT}" "${USER}" "${_pw}" > "$MYCNF"
+        unset _pw
+
+        # Ask the server what it is: option sets differ between MySQL 5.6,
+        # MySQL 8+ and MariaDB. A failed probe falls back to the oldest
+        # supported server, which is the conservative choice.
+        SRV_RAW=""
+        if command -v mysql >/dev/null 2>&1; then
+          SRV_RAW="$(mysql --defaults-file="$MYCNF" -N -B -e 'SELECT VERSION()' 2>/dev/null | head -n1 || true)"
+        fi
+        if [[ -n "$SRV_RAW" ]]; then
+          case "$(tolower "$SRV_RAW")" in
+            *mariadb*) SRV_FLAVOR=mariadb ;;
+            *)         SRV_FLAVOR=mysql ;;
+          esac
+          _num="${SRV_RAW%%-*}"
+          _maj="${_num%%.*}"; _rest="${_num#*.}"; _min="${_rest%%.*}"
+          [[ "$_maj" =~ ^[0-9]+$ ]] || _maj=0
+          [[ "$_min" =~ ^[0-9]+$ ]] || _min=0
+          SRV_V=$(( _maj * 100 + _min ))
+          log "MySQL [${name}]: server is ${SRV_FLAVOR} ${_maj}.${_min} (${SRV_RAW})"
+        else
+          SRV_FLAVOR=unknown
+          SRV_V=0
+          warn "MySQL [${name}]: could not read server version; using legacy-safe dump options."
+        fi
+
+        DUMP_OPTS=( --single-transaction --routines --triggers )
+
+        # Pin the connection charset. MariaDB 11.4+ clients otherwise negotiate
+        # utf8mb4_uca1400_* collations that pre-8.0 MySQL servers reject.
+        DUMP_OPTS+=( --default-character-set="${CHARSET:-utf8mb4}" )
+
+        # Dumping events needs the EVENT privilege, which legacy instances
+        # often lack. Opt out per database with SKIP_EVENTS=true.
+        if [[ "$(tolower "${SKIP_EVENTS:-false}")" != "true" ]]; then
+          DUMP_OPTS+=( --events )
+        fi
+
+        # MySQL 8 clients read information_schema.COLUMN_STATISTICS, which does
+        # not exist before 8.0. MariaDB clients have no such flag, so only add
+        # it when the client actually understands it.
+        if [[ "${SRV_FLAVOR}" != "mysql" || "${SRV_V}" -lt 800 ]]; then
+          if [[ "$(mysqldump --help 2>/dev/null || true)" == *--column-statistics* ]]; then
+            DUMP_OPTS+=( --column-statistics=0 )
+          fi
+        fi
+
+        # Per-database escape hatch, e.g. EXTRA_OPTS="--skip-ssl --no-tablespaces"
+        EXTRA_ARR=()
+        [[ -n "${EXTRA_OPTS:-}" ]] && read -r -a EXTRA_ARR <<< "${EXTRA_OPTS}"
+
         log "MySQL [${name}]: dumping '${DATABASE}' from ${HOST}:${PORT} -> ${OUT}"
-        mysqldump \
-          --host="${HOST}" --port="${PORT}" \
-          --user="${USER}" --password="${PASSWORD}" \
-          --single-transaction --routines --triggers --events \
+        log "MySQL [${name}]: options: ${DUMP_OPTS[*]} ${EXTRA_OPTS:-}"
+        set +e
+        mysqldump --defaults-file="$MYCNF" \
+          "${DUMP_OPTS[@]}" ${EXTRA_ARR+"${EXTRA_ARR[@]}"} \
           --databases "${DATABASE}" \
         | gzip -1 > "${OUT}"
+        dump_rc=${PIPESTATUS[0]}
+        set -e
+        rm -f "$MYCNF"
+        if [[ ${dump_rc} -ne 0 ]]; then
+          rm -f "${OUT}"
+          die "MySQL [${name}]: mysqldump failed (exit ${dump_rc}); partial dump removed."
+        fi
         ;;
       P)
         PORT="${PORT:-5432}"

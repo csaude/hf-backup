@@ -327,6 +327,27 @@ sudo ./hf-tool.sh --db-list          # verificar configurações criadas
 sudo ./hf-tool.sh --db-remove nome   # remover uma configuração
 ```
 
+#### Opções avançadas (instâncias MySQL antigas)
+
+O dump MySQL detecta automaticamente a versão do servidor (`SELECT VERSION()`) e
+ajusta as opções do `mysqldump`. Se a detecção falhar, são usadas as opções
+compatíveis com as versões mais antigas.
+
+Para casos que exigem ajustes manuais, editar `runtime/dbconf/.<nome>.conf` e
+acrescentar qualquer uma destas chaves opcionais:
+
+| Chave | Padrão | Utilização |
+|---|---|---|
+| `CHARSET` | `utf8mb4` | Conjunto de caracteres da ligação. Usar `utf8` em servidores MySQL 5.6 sem suporte a `utf8mb4`. |
+| `SKIP_EVENTS` | `false` | `true` omite `--events` quando o utilizador de backup não tem o privilégio `EVENT`. |
+| `EXTRA_OPTS` | (vazio) | Opções adicionais passadas ao `mysqldump`, ex: `--skip-ssl --no-tablespaces`. |
+
+```ini
+CHARSET=utf8
+SKIP_EVENTS=true
+EXTRA_OPTS=--skip-ssl
+```
+
 ### 5.4. Escolher o modo de backup
 
 **Modo central (padrão):** o repositório Borg fica num servidor remoto. Não é necessário alterar nada.

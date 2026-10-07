@@ -570,6 +570,20 @@ if compgen -G "${DB_CONF_DIR}/.*.conf" > /dev/null 2>&1; then
           warn "MySQL [${name}]: could not read server version; using legacy-safe dump options."
         fi
 
+        # MariaDB's mysqldump (10.11.14+) reads
+        # information_schema.columns.generation_expression, which MySQL < 5.7
+        # does not have. The image ships Oracle's client under /opt/mysql-client;
+        # use it for anything that is not a MariaDB server.
+        DUMP_BIN=mysqldump
+        MYSQL_DUMP_BIN=/opt/mysql-client/usr/bin/mysqldump
+        if [[ "${SRV_FLAVOR}" != "mariadb" ]]; then
+          if [[ -x "$MYSQL_DUMP_BIN" ]]; then
+            DUMP_BIN="$MYSQL_DUMP_BIN"
+          elif [[ "${SRV_V}" -lt 507 ]]; then
+            warn "MySQL [${name}]: ${MYSQL_DUMP_BIN} not found; MariaDB mysqldump may fail against MySQL < 5.7. Rebuild/pull the backup image."
+          fi
+        fi
+
         DUMP_OPTS=( --single-transaction --routines --triggers )
 
         # Pin the connection charset. MariaDB 11.4+ clients otherwise negotiate
@@ -586,7 +600,7 @@ if compgen -G "${DB_CONF_DIR}/.*.conf" > /dev/null 2>&1; then
         # not exist before 8.0. MariaDB clients have no such flag, so only add
         # it when the client actually understands it.
         if [[ "${SRV_FLAVOR}" != "mysql" || "${SRV_V}" -lt 800 ]]; then
-          if [[ "$(mysqldump --help 2>/dev/null || true)" == *--column-statistics* ]]; then
+          if [[ "$("$DUMP_BIN" --help 2>/dev/null || true)" == *--column-statistics* ]]; then
             DUMP_OPTS+=( --column-statistics=0 )
           fi
         fi
@@ -596,9 +610,10 @@ if compgen -G "${DB_CONF_DIR}/.*.conf" > /dev/null 2>&1; then
         [[ -n "${EXTRA_OPTS:-}" ]] && read -r -a EXTRA_ARR <<< "${EXTRA_OPTS}"
 
         log "MySQL [${name}]: dumping '${DATABASE}' from ${HOST}:${PORT} -> ${OUT}"
+        log "MySQL [${name}]: client: ${DUMP_BIN}"
         log "MySQL [${name}]: options: ${DUMP_OPTS[*]} ${EXTRA_OPTS:-}"
         set +e
-        mysqldump --defaults-file="$MYCNF" \
+        "$DUMP_BIN" --defaults-file="$MYCNF" \
           "${DUMP_OPTS[@]}" ${EXTRA_ARR+"${EXTRA_ARR[@]}"} \
           --databases "${DATABASE}" \
         | gzip -1 > "${OUT}"
